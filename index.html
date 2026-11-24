@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Portal Kertas Peperiksaan</title>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<style>
+  :root { --bg:#f4f6f9; --card:#fff; --ink:#1b2430; --mute:#6b7685; --line:#e3e8ef; --pri:#1f5fbf; --ok:#17803d; --warn:#b45309; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:#fff; border-bottom:1px solid var(--line); padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  header h1 { font-size:17px; margin:0; }
+  main { max-width:860px; margin:24px auto; padding:0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
+  #login { max-width:360px; margin:8vh auto 0; text-align:center; }
+  input[type=password], input[type=text], select, input[type=datetime-local] { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; background:#fff; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.pri { background:var(--pri); border-color:var(--pri); color:#fff; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .err { color:#b42318; min-height:1.4em; margin:8px 0 0; font-size:14px; }
+  .row { display:flex; align-items:center; gap:12px; padding:14px 0; border-top:1px solid var(--line); flex-wrap:wrap; }
+  .row:first-child { border-top:0; }
+  .row .name { flex:1; min-width:200px; font-weight:600; }
+  .row .meta { color:var(--mute); font-size:13px; font-weight:400; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:99px; background:#e8f5ec; color:var(--ok); }
+  .badge.lock { background:#fdf1e0; color:var(--warn); }
+  .admin-box { width:100%; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; color:var(--mute); }
+  .admin-box input { width:auto; padding:6px 8px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:6px 8px; border-top:1px solid var(--line); }
+  h2 { font-size:16px; margin:28px 0 10px; }
+  #modal { position:fixed; inset:0; background:#3b4351; display:none; flex-direction:column; z-index:10; }
+  #modal.on { display:flex; }
+  #modal .bar { background:#fff; padding:10px 16px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  #pages { flex:1; overflow:auto; padding:16px 8px; }
+  #pages canvas { display:block; margin:0 auto 12px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.35); max-width:100%; }
+  #pages .msg { color:#fff; text-align:center; margin-top:40px; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📄 Portal Kertas Peperiksaan</h1>
+  <div><span id="who" style="color:var(--mute);font-size:13px"></span> <button id="logout" class="hidden">Log keluar</button></div>
+</header>
+<main>
+  <section id="login" class="card">
+    <h2 style="margin-top:0">Log masuk</h2>
+    <form id="loginForm">
+      <input type="text" id="name" placeholder="Nama penuh" autocomplete="name" maxlength="60" style="margin-bottom:8px">
+      <select id="state" style="margin-bottom:8px"><option value="">Pilih negeri…</option></select>
+      <input type="password" id="code" placeholder="Kod akses" autocomplete="off">
+      <p class="err" id="loginErr"></p>
+      <button class="pri" style="width:100%" id="loginBtn">Masuk</button>
+    </form>
+  </section>
+
+  <section id="app" class="hidden">
+    <div id="list">Memuatkan…</div>
+    <div id="adminLog" class="hidden">
+      <h2>Log akses (200 terkini)</h2>
+      <div class="card" style="overflow:auto"><table id="logTable"></table></div>
+    </div>
+  </section>
+</main>
+
+<div id="modal">
+  <div class="bar"><strong id="modalTitle"></strong><div><button id="modalDl" class="pri">Muat turun</button> <button id="modalClose">Tutup</button></div></div>
+  <div id="pages"></div>
+</div>
+
+<script>
+// ---- TETAPAN ----
+// Kosongkan ('') jika laman dibuka daripada pautan Apps Script.
+// Jika index.html dihos di luar Apps Script, tampal "Web app URL" anda di sini.
+const API_URL = 'https://script.google.com/macros/s/AKfycbwWi5iDn2WVh_D6CAa-EuuQO1ooZ1eMKMbKQQqjxvxh0f_XPDlMiOKCEAHJKsnmnAktyg/exec';
+
+const $ = s => document.querySelector(s);
+let token = null, role = null, current = null;
+
+const fmtDate = iso => new Date(iso).toLocaleString('ms-MY', { timeZone: 'Asia/Kuala_Lumpur', dateStyle: 'medium', timeStyle: 'short' });
+const fmtSize = n => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+
+function el(tag, props = {}, ...kids) {
+  const n = Object.assign(document.createElement(tag), props);
+  n.append(...kids); return n;
+}
+
+function run(fn, ...args) {
+  const fail = e => {
+    const msg = String((e && e.message) || e).replace(/^Error:\s*/, '');
+    if (/Sesi tamat/.test(msg)) showLogin();
+    return new Error(msg);
+  };
+  if (API_URL) {
+    // Mod luar: panggil Apps Script melalui fetch (text/plain supaya tiada preflight CORS)
+    return fetch(API_URL, {
+      method: 'POST', redirect: 'follow',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ fn, args })
+    }).then(r => r.json())
+      .then(j => { if (!j.ok) throw new Error(j.error); return j.data; })
+      .catch(e => { throw fail(e); });
+  }
+  return new Promise((resolve, reject) => {
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(e => reject(fail(e)))[fn](...args);
+  });
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64), out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/* ---------- Log masuk ---------- */
+function showLogin() {
+  token = null; role = null;
+  $('#login').classList.remove('hidden'); $('#app').classList.add('hidden');
+  $('#logout').classList.add('hidden'); $('#who').textContent = '';
+  closeViewer();
+}
+async function showApp() {
+  $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); $('#logout').classList.remove('hidden');
+  $('#adminLog').classList.toggle('hidden', role !== 'admin');
+  await loadPapers();
+  if (role === 'admin') loadLog();
+}
+
+run('api_states').then(states => { for (const s of states) $('#state').append(el('option', { value: s, textContent: s })); });
+
+$('#loginForm').addEventListener('submit', async e => {
+  e.preventDefault(); $('#loginErr').textContent = '';
+  $('#loginBtn').disabled = true;
+  try {
+    const j = await run('api_login', $('#code').value, $('#name').value, $('#state').value);
+    token = j.token; role = j.role; $('#code').value = '';
+    $('#who').textContent = role === 'admin' ? 'Admin' : `${j.name} (${j.state})`;
+    showApp();
+  } catch (err) { $('#loginErr').textContent = err.message; }
+  $('#loginBtn').disabled = false;
+});
+$('#logout').onclick = async () => { try { await run('api_logout', token); } catch (e) {} showLogin(); };
+
+/* ---------- Senarai kertas ---------- */
+async function loadPapers() {
+  const list = $('#list'); list.textContent = 'Memuatkan…';
+  try {
+    const papers = await run('api_papers', token);
+    list.replaceChildren();
+    if (!papers.length) { list.append(el('div', { className: 'card', textContent: 'Tiada kertas lagi.' })); return; }
+    const groups = [], map = {};
+    for (const p of papers) { if (!map[p.group]) { map[p.group] = []; groups.push(p.group); } map[p.group].push(p); }
+    for (const g of groups) {
+      const card = el('div', { className: 'card' });
+      if (role === 'admin') card.append(groupBar(g, map[g].length));
+      for (const p of map[g]) card.append(row(p));
+      list.append(el('h2', { textContent: g }), card);
+    }
+  } catch (err) { list.textContent = err.message; }
+}
+
+function groupBar(group, n) {
+  const dt = el('input', { type: 'datetime-local' });
+  const act = async (releaseAt, msg) => {
+    if (!confirm(msg)) return;
+    try { await run('api_setReleaseGroup', token, group, releaseAt); loadPapers(); loadLog(); } catch (e) { alert(e.message); }
+  };
+  return el('div', { className: 'admin-box', style: 'padding-bottom:12px' },
+    el('strong', { textContent: `Semua ${n} kertas ${group}:` }), dt,
+    el('button', { textContent: 'Simpan masa', onclick: () => dt.value ? act(new Date(dt.value).toISOString(), `Tetapkan masa lepas untuk semua kertas ${group}?`) : alert('Pilih tarikh & masa') }),
+    el('button', { textContent: 'Lepas semua sekarang', onclick: () => act('now', `Lepaskan SEMUA kertas ${group} SEKARANG?`) }),
+    el('button', { textContent: 'Kunci semua', onclick: () => act(null, `Kunci semula semua kertas ${group}?`) }));
+}
+
+function row(p) {
+  const status = p.released
+    ? el('span', { className: 'badge', textContent: 'Boleh diakses' })
+    : el('span', { className: 'badge lock', textContent: p.releaseAt ? 'Dilepas ' + fmtDate(p.releaseAt) : 'Belum dilepaskan' });
+  const view = el('button', { className: 'pri', textContent: 'Lihat', disabled: !p.canOpen, onclick: () => openViewer(p) });
+  const dl = el('button', { textContent: 'Muat turun', disabled: !p.canOpen });
+  dl.onclick = () => downloadPaper(p, dl);
+  const r = el('div', { className: 'row' },
+    el('div', { className: 'name' }, p.name, el('div', { className: 'meta', textContent: fmtSize(p.size) })),
+    status, view, dl);
+
+  if (role === 'admin') {
+    const dt = el('input', { type: 'datetime-local' });
+    if (p.releaseAt) { const d = new Date(p.releaseAt); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); dt.value = d.toISOString().slice(0, 16); }
+    const act = async releaseAt => {
+      try { await run('api_setRelease', token, p.id, releaseAt); loadPapers(); loadLog(); } catch (e) { alert(e.message); }
+    };
+    r.append(el('div', { className: 'admin-box' },
+      'Masa lepas:', dt,
+      el('button', { textContent: 'Simpan', onclick: () => dt.value ? act(new Date(dt.value).toISOString()) : alert('Pilih tarikh & masa') }),
+      el('button', { textContent: 'Lepas sekarang', onclick: () => act('now') }),
+      el('button', { textContent: 'Kunci', onclick: () => act(null) })));
+  }
+  return r;
+}
+
+/* ---------- Paparan PDF (pdf.js) ---------- */
+let workerReady = false;
+async function initPdfjs() {
+  if (workerReady) return;
+  const url = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  const src = await (await fetch(url)).text();
+  pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+  workerReady = true;
+}
+
+// Watermark: satu baris footer kecil di tengah bawah setiap halaman
+function stampCanvas(ctx, w, h, label) {
+  ctx.save();
+  ctx.globalAlpha = 0.8;
+  ctx.fillStyle = '#666';
+  const size = Math.max(10, w / 90);
+  ctx.font = `${size}px Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.translate(w - size * 1.2, h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(label, 0, 0);
+  ctx.restore();
+}
+
+let viewId = 0;
+async function openViewer(p) {
+  current = p;
+  const myView = ++viewId;
+  $('#modalTitle').textContent = p.name;
+  const pages = $('#pages');
+  pages.replaceChildren(el('div', { className: 'msg', textContent: 'Memuatkan kertas…' }));
+  $('#modal').classList.add('on');
+  try {
+    const [r] = await Promise.all([run('api_file', token, p.id, 'lihat'), initPdfjs()]);
+    if (myView !== viewId) return;
+    const pdf = await pdfjsLib.getDocument({ data: b64ToBytes(r.data) }).promise;
+    pages.replaceChildren();
+    const avail = Math.min(pages.clientWidth - 16, 900);
+    const dpr = window.devicePixelRatio || 1;
+    for (let i = 1; i <= pdf.numPages; i++) {
+      if (myView !== viewId) return;
+      const page = await pdf.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const scale = avail / base.width;
+      const vp = page.getViewport({ scale: scale * dpr });
+      const c = el('canvas');
+      c.width = vp.width; c.height = vp.height;
+      c.style.width = (vp.width / dpr) + 'px'; c.style.height = (vp.height / dpr) + 'px';
+      pages.append(c);
+      const ctx = c.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      stampCanvas(ctx, c.width, c.height, r.label);
+    }
+  } catch (err) {
+    pages.replaceChildren(el('div', { className: 'msg', textContent: err.message }));
+  }
+}
+function closeViewer() { viewId++; $('#modal').classList.remove('on'); $('#pages').replaceChildren(); current = null; }
+$('#modalClose').onclick = closeViewer;
+$('#modalDl').onclick = () => { if (current) downloadPaper(current, $('#modalDl')); };
+
+/* ---------- Muat turun + watermark footer (pdf-lib) ---------- */
+async function downloadPaper(p, btn) {
+  const old = btn.textContent; btn.disabled = true; btn.textContent = 'Menyediakan…';
+  try {
+    const r = await run('api_file', token, p.id, 'muat_turun');
+    const doc = await PDFLib.PDFDocument.load(b64ToBytes(r.data), { ignoreEncryption: true });
+    const font = await doc.embedFont(PDFLib.StandardFonts.Helvetica);
+    for (const page of doc.getPages()) {
+      const { width, height } = page.getSize();
+      const size = 8;
+      const tw = font.widthOfTextAtSize(r.label, size);
+      page.drawText(r.label, {
+        x: width - 15, y: (height - tw) / 5, size, font,
+        rotate: PDFLib.degrees(90),
+        color: PDFLib.rgb(0.4, 0.4, 0.4), opacity: 0.8
+      });
+    }
+    const blob = new Blob([await doc.save()], { type: 'application/pdf' });
+    const a = el('a', { href: URL.createObjectURL(blob), download: r.name + '.pdf' });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  } catch (err) { alert(err.message); }
+  btn.disabled = false; btn.textContent = old;
+}
+
+/* ---------- Log admin ---------- */
+async function loadLog() {
+  try {
+    const rows = await run('api_log', token);
+    const t = $('#logTable'); t.replaceChildren();
+    t.append(el('tr', {}, ...['Masa', 'Nama', 'Negeri', 'Tindakan', 'Fail'].map(h => el('th', { textContent: h }))));
+    for (const l of rows) t.append(el('tr', {}, ...[l.time, l.name, l.state, l.action, l.file].map(v => el('td', { textContent: v }))));
+  } catch (e) {}
+}
+</script>
+</body>
+</html>
